@@ -1451,6 +1451,16 @@ init_linktype(p)
 		off_nl_nosnap = -1;
 		return;
 
+	case DLT_DECT_LINUX:
+		/*
+		 * Currently, only raw "link[N:M]" filtering is supported.
+		 */
+		off_linktype = -1;
+		off_macpl = -1;
+		off_nl = -1;
+		off_nl_nosnap = -1;
+		return;
+
 	case DLT_CAN20B:
 		/*
 		 * Currently, only raw "link[N:M]" filtering is supported.

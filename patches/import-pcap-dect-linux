@@ -1,0 +1,445 @@
+Bottom: b90d8bc31a6fb418b72caaeaa1ad1a9b37366c6b
+Top:    402096178a05c04460bef1c399031f1d10fe411e
+Author: Patrick McHardy <kaber@trash.net>
+Date:   2010-10-15 02:21:10 +0200
+
+Import pcap-dect-linux
+
+Signed-off-by: Patrick McHardy <kaber@trash.net>
+
+
+---
+
+diff --git a/Makefile.in b/Makefile.in
+index ae2e4a3..5fcfb78 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -82,7 +82,7 @@ YACC = @V_YACC@
+ 	@rm -f $@
+ 	$(CC) $(FULL_CFLAGS) -c $(srcdir)/$*.c
+ 
+-PSRC =	pcap-@V_PCAP@.c @USB_SRC@ @BT_SRC@ @CAN_SRC@
++PSRC =	pcap-@V_PCAP@.c @USB_SRC@ @BT_SRC@ @CAN_SRC@ @DECT_SRC@
+ FSRC =  fad-@V_FINDALLDEVS@.c
+ SSRC =  @SSRC@
+ CSRC =	pcap.c inet.c gencode.c optimize.c nametoaddr.c etherent.c \
+@@ -313,6 +313,8 @@ EXTRA_DIST = \
+ 	pcap-snoop.c \
+ 	pcap-usb-linux.c \
+ 	pcap-usb-linux.h \
++	pcap-dect-linux.c \
++	pcap-dect-linux.h \
+ 	pcap-win32.c \
+ 	runlex.sh \
+ 	scanner.l \
+diff --git a/config.h.in b/config.h.in
+index f988e8f..688f596 100644
+--- a/config.h.in
++++ b/config.h.in
+@@ -223,6 +223,8 @@
+ /* target host supports USB sniffing */
+ #undef PCAP_SUPPORT_USB
+ 
++#undef PCAP_SUPPORT_DECT
++
+ /* include ACN support */
+ #undef SITA
+ 
+diff --git a/configure.in b/configure.in
+index d71d3fd..16e0299 100644
+--- a/configure.in
++++ b/configure.in
+@@ -1398,6 +1398,21 @@ esac
+ AC_SUBST(PCAP_SUPPORT_USB)
+ AC_SUBST(USB_SRC)
+ 
++AC_MSG_CHECKING(for DECT sniffing support)
++case "$host_os" in
++linux*)
++	AC_CHECK_LIB([nl-dect],[nl_dect_cluster_alloc_cache],
++		     AC_DEFINE(PCAP_SUPPORT_DECT, 1, [target host supports DECT sniffing]),
++		     AC_MSG_RESULT([no]))
++	DECT_SRC=pcap-dect-linux.c
++	;;
++*)
++	AC_MSG_RESULT(no)
++	;;
++esac
++AC_SUBST(PCAP_SUPPORT_DECT)
++AC_SUBST(DECT_SRC)
++
+ AC_ARG_ENABLE([bluetooth],
+ [AC_HELP_STRING([--enable-bluetooth],[enable Bluetooth support @<:@default=yes, if support available@:>@])],
+ ,enable_bluetooth=yes)
+diff --git a/gencode.c b/gencode.c
+index f66492e..5b113cf 100644
+--- a/gencode.c
++++ b/gencode.c
+@@ -1451,6 +1451,16 @@ init_linktype(p)
+ 		off_nl_nosnap = -1;
+ 		return;
+ 
++	case DLT_DECT_LINUX:
++		/*
++		 * Currently, only raw "link[N:M]" filtering is supported.
++		 */
++		off_linktype = -1;
++		off_macpl = -1;
++		off_nl = -1;
++		off_nl_nosnap = -1;
++		return;
++
+ 	case DLT_CAN20B:
+ 		/*
+ 		 * Currently, only raw "link[N:M]" filtering is supported.
+diff --git a/inet.c b/inet.c
+index 178eb81..642ffb0 100644
+--- a/inet.c
++++ b/inet.c
+@@ -740,6 +740,9 @@ pcap_lookupnet(device, netp, maskp, errbuf)
+ #ifdef HAVE_SNF_API
+ 	    || strstr(device, "snf") != NULL
+ #endif
++#ifdef PCAP_SUPPORT_DECT
++	    || strstr(device, "dect") != NULL
++#endif
+ 	    ) {
+ 		*netp = *maskp = 0;
+ 		return 0;
+diff --git a/pcap-dect-linux.c b/pcap-dect-linux.c
+new file mode 100644
+index 0000000..4207868
+--- /dev/null
++++ b/pcap-dect-linux.c
+@@ -0,0 +1,256 @@
++/*
++ * Copyright (C) 2009 Patrick McHardy <kaber@trash.net>
++ *
++ * Licensed under the same license as libpcap itself.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include "pcap-int.h"
++#include "pcap-dect-linux.h"
++
++#ifdef NEED_STRERROR_H
++#include "strerror.h"
++#endif
++
++#include <ctype.h>
++#include <errno.h>
++#include <stdlib.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <unistd.h>
++#include <string.h>
++#include <sys/types.h>
++#include <sys/socket.h>
++
++#include <linux/types.h>
++#include <linux/dect.h>
++#include <linux/netlink.h>
++#include <netlink/cache.h>
++#include <netlink/dect/cell.h>
++
++#define PF_DECT		38
++#define AF_DECT		PF_DECT
++#define SOL_DECT	279
++
++struct cb_args {
++	pcap_if_t	**alldevsp;
++	char		*err_str;
++	bool		err;
++};
++
++static void add_cell_cb(struct nl_object *obj, void *arg)
++{
++	struct cb_args *args = arg;
++	char dev_name[32];
++
++	if (args->err)
++		return;
++
++	snprintf(dev_name, sizeof(dev_name), "dect-%s",
++		 nl_dect_cell_get_name((struct nl_dect_cell *)obj));
++
++	if (pcap_add_if(args->alldevsp, dev_name, 0, NULL, args->err_str) < 0)
++		args->err = true;
++}
++
++int dect_platform_finddevs(pcap_if_t **alldevsp, char *err_str)
++{
++	struct nl_sock *sock;
++	struct nl_cache *cell_cache;
++	struct cb_args args = {
++		.alldevsp	= alldevsp,
++		.err_str	= err_str,
++	};
++
++	sock = nl_socket_alloc();
++	if (sock == NULL) {
++		snprintf(err_str, PCAP_ERRBUF_SIZE, "socket: %s",
++			 pcap_strerror(errno));
++		return -1;
++	}
++	if (nl_connect(sock, NETLINK_DECT) < 0) {
++		snprintf(err_str, PCAP_ERRBUF_SIZE, "connect: %s",
++			 pcap_strerror(errno));
++		return -1;
++	}
++	if (nl_dect_cell_alloc_cache(sock, &cell_cache) < 0) {
++		snprintf(err_str, PCAP_ERRBUF_SIZE, "cache: %s",
++			 pcap_strerror(errno));
++		return -1;
++	}
++
++	nl_cache_foreach(cell_cache, add_cell_cb, &args);
++	nl_socket_free(sock);
++
++	return args.err ? -1 : 0;
++}
++
++/*
++ * compatible header to what wireshark is expecting from the CoA
++ * character device for now.
++ */
++struct dect_dummy_hdr {
++	uint8_t		etheraddrs[2 * 6];
++	uint16_t	ethertype;
++
++	uint8_t		trxmode;
++	uint8_t		channel;
++	uint16_t	slot;
++	uint8_t		frame;
++	uint8_t		rssi;
++	uint8_t		preamble[3];
++	uint16_t	packettype;
++} __attribute__((packed));
++
++static int dect_read_linux(pcap_t *handle, int max_packets,
++			   pcap_handler callback, u_char *user)
++{
++	struct pcap_pkthdr hdr;
++	struct dect_dummy_hdr *dhdr;
++	struct iovec iov;
++	struct msghdr msg;
++	struct dect_raw_auxdata *aux;
++	struct cmsghdr *cmsg;
++	union {
++		struct cmsghdr		cmsg;
++		char			buf[CMSG_SPACE(sizeof(*aux))];
++	} cmsg_buf;
++	ssize_t len;
++
++	/* refuse anything below dummy header size for simplicity */
++	if (handle->bufsize < sizeof(*dhdr))
++		return -1;
++
++	dhdr = (struct dect_dummy_hdr *)handle->buffer;
++	memset(dhdr, 0, sizeof(*dhdr));
++	dhdr->ethertype = 0x2323;
++	dhdr->trxmode	= 0;
++	dhdr->channel	= 0;
++
++	msg.msg_name		= NULL;
++	msg.msg_namelen		= 0;
++	msg.msg_iov		= &iov;
++	msg.msg_iovlen		= 1;
++	msg.msg_control		= &cmsg_buf;
++	msg.msg_controllen	= sizeof(cmsg_buf);
++	msg.msg_flags		= 0;
++
++	iov.iov_len		= handle->bufsize - sizeof(*dhdr);
++	iov.iov_base		= handle->buffer + sizeof(*dhdr);
++
++	do {
++		if (handle->break_loop) {
++			handle->break_loop = 0;
++			return -2;
++		}
++
++		len = recvmsg(handle->fd, &msg, 0);
++	} while (len == -1 && (errno == EINTR || errno == ENETDOWN));
++
++	if (len == -1) {
++		if (errno == EAGAIN)
++			return 0;
++		else {
++			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
++				 "recvfrom: %s", pcap_strerror(errno));
++			return -1;
++		}
++	}
++
++	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL;
++	     cmsg = CMSG_NXTHDR(&msg, cmsg)) {
++		if (cmsg->cmsg_level != SOL_DECT ||
++		    cmsg->cmsg_type != DECT_RAW_AUXDATA ||
++		    cmsg->cmsg_len < CMSG_LEN(sizeof(*aux)))
++			continue;
++
++		aux = (struct dect_raw_auxdata *)CMSG_DATA(cmsg);
++		dhdr->slot = htons(aux->slot);
++		dhdr->rssi = aux->rssi;
++		dhdr->frame = aux->frame;
++		if (aux->slot < 12)
++			dhdr->packettype = htons(0xe98a);
++		else
++			dhdr->packettype = htons(0x1675);
++	}
++
++	gettimeofday(&hdr.ts, NULL);
++	hdr.caplen = len + sizeof(*dhdr);
++	hdr.len    = len + sizeof(*dhdr);
++	callback(user, &hdr, handle->buffer);
++	return 1;
++}
++
++static int dect_setfilter_linux(pcap_t *handle, struct bpf_program *fp)
++{
++	return 0;
++}
++
++static int dect_setdirection_linux(pcap_t *handle, pcap_direction_t d)
++{
++	handle->direction = d;
++	return 0;
++}
++
++static int dect_activate(pcap_t *handle)
++{
++	struct sockaddr_dect da;
++
++	handle->bufsize		= handle->snapshot;
++	handle->offset		= 0;
++#if 0
++	handle->linktype	= DLT_DECT_LINUX;
++#else
++	handle->linktype	= DLT_EN10MB;
++#endif
++
++	handle->inject_op	= NULL;
++	handle->setfilter_op	= dect_setfilter_linux;
++	handle->setdirection_op = dect_setdirection_linux;
++	handle->set_datalink_op	= NULL;
++	handle->getnonblock_op	= pcap_getnonblock_fd;
++	handle->setnonblock_op	= pcap_setnonblock_fd;
++	handle->read_op		= dect_read_linux;
++
++	handle->fd = socket(PF_DECT, SOCK_RAW, 0);
++	if (handle->fd < 0) {
++		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
++			 "Can't open PF_DECT socket: %s",
++			 pcap_strerror(errno));
++		return PCAP_ERROR;
++	}
++
++	memset(&da, 0, sizeof(da));
++	da.dect_family = AF_DECT;
++	if (bind(handle->fd, (struct sockaddr *)&da, sizeof(da)) < 0) {
++		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
++			 "Can't bind PF_DECT socket: %s",
++			 pcap_strerror(errno));
++		return PCAP_ERROR;
++	}
++
++	handle->selectable_fd = handle->fd;
++	handle->buffer = malloc(handle->bufsize);
++	if (!handle->buffer) {
++		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
++			 "Can't allocate packet buffer: %s",
++			 pcap_strerror(errno));
++		return PCAP_ERROR;
++	}
++	return 0;
++}
++
++pcap_t *dect_create(const char *device, char *ebuf)
++{
++	pcap_t *p;
++
++	p = pcap_create_common(device, ebuf);
++	if (p == NULL)
++		return NULL;
++
++	p->activate_op = dect_activate;
++	return p;
++}
+diff --git a/pcap-dect-linux.h b/pcap-dect-linux.h
+new file mode 100644
+index 0000000..f8d1546
+--- /dev/null
++++ b/pcap-dect-linux.h
+@@ -0,0 +1,2 @@
++int dect_platform_finddevs(pcap_if_t **alldevsp, char *err_str);
++pcap_t *dect_create(const char *device, char *ebuf);
+diff --git a/pcap-linux.c b/pcap-linux.c
+index f8b3f10..9cdc0bf 100644
+--- a/pcap-linux.c
++++ b/pcap-linux.c
+@@ -191,6 +191,10 @@ static const char rcsid[] _U_ =
+ #include "pcap-can-linux.h"
+ #endif
+ 
++#ifdef PCAP_SUPPORT_DECT
++#include "pcap-dect-linux.h"
++#endif
++
+ /*
+  * If PF_PACKET is defined, we can use {SOCK_RAW,SOCK_DGRAM}/PF_PACKET
+  * sockets rather than SOCK_PACKET sockets.
+@@ -410,6 +414,12 @@ pcap_create(const char *device, char *ebuf)
+ 	}
+ #endif
+ 
++#ifdef PCAP_SUPPORT_DECT
++	if (strstr(device, "dect")) {
++		return dect_create(device, ebuf);
++	}
++#endif
++
+ 	handle = pcap_create_common(device, ebuf);
+ 	if (handle == NULL)
+ 		return NULL;
+@@ -2164,6 +2174,10 @@ pcap_platform_finddevs(pcap_if_t **alldevsp, char *errbuf)
+ 		return (-1);
+ #endif
+ 
++#ifdef PCAP_SUPPORT_DECT
++	if (dect_platform_finddevs(alldevsp, errbuf) < 0)
++		return (-1);
++#endif
+ 	return (0);
+ }
+ 
+diff --git a/pcap.c b/pcap.c
+index 4b64a38..3db3320 100644
+--- a/pcap.c
++++ b/pcap.c
+@@ -820,6 +820,7 @@ static struct dlt_choice dlt_choices[] = {
+ 	DLT_CHOICE(DLT_BLUETOOTH_HCI_H4, "Bluetooth HCI UART transport layer"),
+ 	DLT_CHOICE(DLT_IEEE802_16_MAC_CPS, "IEEE 802.16 MAC Common Part Sublayer"),
+ 	DLT_CHOICE(DLT_USB_LINUX, "USB with Linux header"),
++	DLT_CHOICE(DLT_DECT_LINUX, "DECT with Linux header"),
+ 	DLT_CHOICE(DLT_CAN20B, "Controller Area Network (CAN) v. 2.0B"),
+ 	DLT_CHOICE(DLT_IEEE802_15_4_LINUX, "IEEE 802.15.4 with Linux padding"),
+ 	DLT_CHOICE(DLT_PPI, "Per-Packet Information"),
+diff --git a/pcap/bpf.h b/pcap/bpf.h
+index 6048fff..30ebdce 100644
+--- a/pcap/bpf.h
++++ b/pcap/bpf.h
+@@ -970,6 +970,11 @@ struct bpf_version {
+ #define DLT_IEEE802_15_4_NOFCS		230
+ 
+ /*
++ * DECT
++ */
++#define DLT_DECT_LINUX		215
++
++/*
+  * DLT and savefile link type values are split into a class and
+  * a member of that class.  A class value of 0 indicates a regular
+  * DLT_/LINKTYPE_ value.

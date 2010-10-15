@@ -972,7 +972,7 @@ struct bpf_version {
 /*
  * DECT
  */
-#define DLT_DECT_LINUX		215
+#define DLT_DECT_LINUX			231
 
 /*
  * DLT and savefile link type values are split into a class and

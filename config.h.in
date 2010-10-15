@@ -223,6 +223,8 @@
 /* target host supports USB sniffing */
 #undef PCAP_SUPPORT_USB
 
+#undef PCAP_SUPPORT_DECT
+
 /* include ACN support */
 #undef SITA
 

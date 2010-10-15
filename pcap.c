@@ -820,6 +820,7 @@ static struct dlt_choice dlt_choices[] = {
 	DLT_CHOICE(DLT_BLUETOOTH_HCI_H4, "Bluetooth HCI UART transport layer"),
 	DLT_CHOICE(DLT_IEEE802_16_MAC_CPS, "IEEE 802.16 MAC Common Part Sublayer"),
 	DLT_CHOICE(DLT_USB_LINUX, "USB with Linux header"),
+	DLT_CHOICE(DLT_DECT_LINUX, "DECT with Linux header"),
 	DLT_CHOICE(DLT_CAN20B, "Controller Area Network (CAN) v. 2.0B"),
 	DLT_CHOICE(DLT_IEEE802_15_4_LINUX, "IEEE 802.15.4 with Linux padding"),
 	DLT_CHOICE(DLT_PPI, "Per-Packet Information"),

@@ -191,6 +191,10 @@ static const char rcsid[] _U_ =
 #include "pcap-can-linux.h"
 #endif
 
+#ifdef PCAP_SUPPORT_DECT
+#include "pcap-dect-linux.h"
+#endif
+
 /*
  * If PF_PACKET is defined, we can use {SOCK_RAW,SOCK_DGRAM}/PF_PACKET
  * sockets rather than SOCK_PACKET sockets.
@@ -407,6 +411,12 @@ pcap_create(const char *device, char *ebuf)
 #ifdef PCAP_SUPPORT_USB
 	if (strstr(device, "usbmon")) {
 		return usb_create(device, ebuf);
+	}
+#endif
+
+#ifdef PCAP_SUPPORT_DECT
+	if (strstr(device, "dect")) {
+		return dect_create(device, ebuf);
 	}
 #endif
 
@@ -2164,6 +2174,10 @@ pcap_platform_finddevs(pcap_if_t **alldevsp, char *errbuf)
 		return (-1);
 #endif
 
+#ifdef PCAP_SUPPORT_DECT
+	if (dect_platform_finddevs(alldevsp, errbuf) < 0)
+		return (-1);
+#endif
 	return (0);
 }
 

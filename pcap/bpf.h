@@ -970,6 +970,11 @@ struct bpf_version {
 #define DLT_IEEE802_15_4_NOFCS		230
 
 /*
+ * DECT
+ */
+#define DLT_DECT_LINUX			231
+
+/*
  * DLT and savefile link type values are split into a class and
  * a member of that class.  A class value of 0 indicates a regular
  * DLT_/LINKTYPE_ value.

@@ -537,8 +537,41 @@ get_mac80211_phydev(pcap_t *handle, const char *device, char *phydev_path,
 	return 1;
 }
 
+#ifdef HAVE_LIBNL_2_x
+#define get_nl_errmsg	nl_geterror
+#else
+/* libnl 2.x compatibility code */
+
+#define nl_sock nl_handle
+
+static inline struct nl_handle *
+nl_socket_alloc(void)
+{
+	return nl_handle_alloc();
+}
+
+static inline void
+nl_socket_free(struct nl_handle *h)
+{
+	nl_handle_destroy(h);
+}
+
+#define get_nl_errmsg	strerror
+
+static inline int
+__genl_ctrl_alloc_cache(struct nl_handle *h, struct nl_cache **cache)
+{
+	struct nl_cache *tmp = genl_ctrl_alloc_cache(h);
+	if (!tmp)
+		return -ENOMEM;
+	*cache = tmp;
+	return 0;
+}
+#define genl_ctrl_alloc_cache __genl_ctrl_alloc_cache
+#endif /* !HAVE_LIBNL_2_x */
+
 struct nl80211_state {
-	struct nl_handle *nl_handle;
+	struct nl_sock *nl_sock;
 	struct nl_cache *nl_cache;
 	struct genl_family *nl80211;
 };
@@ -546,23 +579,26 @@ struct nl80211_state {
 static int
 nl80211_init(pcap_t *handle, struct nl80211_state *state, const char *device)
 {
-	state->nl_handle = nl_handle_alloc();
-	if (!state->nl_handle) {
+	int err;
+
+	state->nl_sock = nl_socket_alloc();
+	if (!state->nl_sock) {
 		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 		    "%s: failed to allocate netlink handle", device);
 		return PCAP_ERROR;
 	}
 
-	if (genl_connect(state->nl_handle)) {
+	if (genl_connect(state->nl_sock)) {
 		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 		    "%s: failed to connect to generic netlink", device);
 		goto out_handle_destroy;
 	}
 
-	state->nl_cache = genl_ctrl_alloc_cache(state->nl_handle);
-	if (!state->nl_cache) {
+	err = genl_ctrl_alloc_cache(state->nl_sock, &state->nl_cache);
+	if (err < 0) {
 		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-		    "%s: failed to allocate generic netlink cache", device);
+		    "%s: failed to allocate generic netlink cache: %s",
+		    device, get_nl_errmsg(-err));
 		goto out_handle_destroy;
 	}
 
@@ -578,7 +614,7 @@ nl80211_init(pcap_t *handle, struct nl80211_state *state, const char *device)
 out_cache_free:
 	nl_cache_free(state->nl_cache);
 out_handle_destroy:
-	nl_handle_destroy(state->nl_handle);
+	nl_socket_free(state->nl_sock);
 	return PCAP_ERROR;
 }
 
@@ -587,7 +623,7 @@ nl80211_cleanup(struct nl80211_state *state)
 {
 	genl_family_put(state->nl80211);
 	nl_cache_free(state->nl_cache);
-	nl_handle_destroy(state->nl_handle);
+	nl_socket_free(state->nl_sock);
 }
 
 static int
@@ -615,12 +651,19 @@ add_mon_if(pcap_t *handle, int sock_fd, struct nl80211_state *state,
 	NLA_PUT_STRING(msg, NL80211_ATTR_IFNAME, mondevice);
 	NLA_PUT_U32(msg, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
 
-	err = nl_send_auto_complete(state->nl_handle, msg);
+	err = nl_send_auto_complete(state->nl_sock, msg);
 	if (err < 0) {
+#ifdef HAVE_LIBNL_2_x
+		if (err == -NLE_FAILURE) {
+#else
 		if (err == -ENFILE) {
+#endif
 			/*
 			 * Device not available; our caller should just
-			 * keep trying.
+			 * keep trying.  (libnl 2.x maps ENFILE to
+			 * NLE_FAILURE; it can also map other errors
+			 * to that, but there's not much we can do
+			 * about that.)
 			 */
 			nlmsg_free(msg);
 			return 0;
@@ -631,17 +674,24 @@ add_mon_if(pcap_t *handle, int sock_fd, struct nl80211_state *state,
 			 */
 			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 			    "%s: nl_send_auto_complete failed adding %s interface: %s",
-			    device, mondevice, strerror(-err));
+			    device, mondevice, get_nl_errmsg(-err));
 			nlmsg_free(msg);
 			return PCAP_ERROR;
 		}
 	}
-	err = nl_wait_for_ack(state->nl_handle);
+	err = nl_wait_for_ack(state->nl_sock);
 	if (err < 0) {
+#ifdef HAVE_LIBNL_2_x
+		if (err == -NLE_FAILURE) {
+#else
 		if (err == -ENFILE) {
+#endif
 			/*
 			 * Device not available; our caller should just
-			 * keep trying.
+			 * keep trying.  (libnl 2.x maps ENFILE to
+			 * NLE_FAILURE; it can also map other errors
+			 * to that, but there's not much we can do
+			 * about that.)
 			 */
 			nlmsg_free(msg);
 			return 0;
@@ -652,7 +702,7 @@ add_mon_if(pcap_t *handle, int sock_fd, struct nl80211_state *state,
 			 */
 			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
 			    "%s: nl_wait_for_ack failed adding %s interface: %s",
-			    device, mondevice, strerror(-err));
+			    device, mondevice, get_nl_errmsg(-err));
 			nlmsg_free(msg);
 			return PCAP_ERROR;
 		}
@@ -695,47 +745,21 @@ del_mon_if(pcap_t *handle, int sock_fd, struct nl80211_state *state,
 		    0, NL80211_CMD_DEL_INTERFACE, 0);
 	NLA_PUT_U32(msg, NL80211_ATTR_IFINDEX, ifindex);
 
-	err = nl_send_auto_complete(state->nl_handle, msg);
+	err = nl_send_auto_complete(state->nl_sock, msg);
 	if (err < 0) {
-		if (err == -ENFILE) {
-			/*
-			 * Device not available; our caller should just
-			 * keep trying.
-			 */
-			nlmsg_free(msg);
-			return 0;
-		} else {
-			/*
-			 * Real failure, not just "that device is not
-			 * available.
-			 */
-			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-			    "%s: nl_send_auto_complete failed deleting %s interface: %s",
-			    device, mondevice, strerror(-err));
-			nlmsg_free(msg);
-			return PCAP_ERROR;
-		}
+		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+		    "%s: nl_send_auto_complete failed deleting %s interface: %s",
+		    device, mondevice, get_nl_errmsg(-err));
+		nlmsg_free(msg);
+		return PCAP_ERROR;
 	}
-	err = nl_wait_for_ack(state->nl_handle);
+	err = nl_wait_for_ack(state->nl_sock);
 	if (err < 0) {
-		if (err == -ENFILE) {
-			/*
-			 * Device not available; our caller should just
-			 * keep trying.
-			 */
-			nlmsg_free(msg);
-			return 0;
-		} else {
-			/*
-			 * Real failure, not just "that device is not
-			 * available.
-			 */
-			snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
-			    "%s: nl_wait_for_ack failed adding %s interface: %s",
-			    device, mondevice, strerror(-err));
-			nlmsg_free(msg);
-			return PCAP_ERROR;
-		}
+		snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,
+		    "%s: nl_wait_for_ack failed adding %s interface: %s",
+		    device, mondevice, get_nl_errmsg(-err));
+		nlmsg_free(msg);
+		return PCAP_ERROR;
 	}
 
 	/*
